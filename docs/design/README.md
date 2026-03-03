@@ -17,7 +17,7 @@ Architecture and design documents for the physical‑AI runtime.
 | Component        | Document                                         | Purpose |
 | ---------------- | ------------------------------------------------ | ------- |
 | Inference Core   | [Inference Core](./components/inferencekit.md)   | Domain‑agnostic inference layer |
-| Robot Interface  | [Robot Interface](./components/robot-interface.md) | Robot ABC and SDK integration |
+| Robot Interface  | [Robot Interface](./components/robot-interface.md) | Robot Protocol and hardware integration |
 | Camera Interface | [Camera Interface](./components/camera-interface.md) | Capture API and camera backends |
 | Benchmarking     | [Benchmarking API](./components/benchmarking.md) | Benchmark protocols + runner |
 

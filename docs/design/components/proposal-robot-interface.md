@@ -42,7 +42,7 @@ from robots import SO101
 model = InferenceModel("./my_policy")
 robot = SO101(port="/dev/ttyUSB0")
 
-with managed(robot):
+with connect(robot):
     obs = robot.get_observation()
     action = model(obs)
     robot.send_action(action)
@@ -176,21 +176,17 @@ class Robot(Protocol):
 
         Implementations MUST leave the robot in a safe, stationary state.
         Motors must be stopped or holding position before the connection
-        is closed. This method is called automatically by the managed()
+        is closed. This method is called automatically by the connect()
         context manager, including when exceptions occur.
         """
         ...
 
     def get_observation(self) -> dict[str, Any]:
-        """Read the current robot state and sensor data.
+        """Read the current robot state.
 
         Returns a dict with the following conventional structure:
 
             {
-                "images": {
-                    "camera_name": np.ndarray,  # (C, H, W) uint8 or float32
-                    ...
-                },
                 "state": np.ndarray,            # joint positions, gripper, etc.
                 "timestamp": float,             # time.monotonic() or equivalent
             }
@@ -198,7 +194,9 @@ class Robot(Protocol):
         The exact keys and shapes must match what the policy expects,
         as declared in the policy's manifest.json under io.inputs.
 
-        Implementations that have no cameras may omit the "images" key.
+        Note: cameras are managed separately from the robot interface.
+        See the Cameras section for how to combine robot state and
+        camera frames into a full observation for the policy.
         """
         ...
 
@@ -216,7 +214,7 @@ class Robot(Protocol):
 
 ## Context Manager
 
-The Protocol cannot provide default method implementations. Instead, `physicalai` ships a context manager wrapper:
+The Protocol cannot provide default method implementations. Instead, `physicalai` ships a `connect()` context manager (like `open()` for files):
 
 ```python
 # physicalai/robots/utils.py
@@ -224,14 +222,14 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def managed(robot):
+def connect(robot):
     """Context manager for safe robot lifecycle.
 
-    Calls connect() on entry and disconnect() on exit, including
-    when exceptions occur.
+    Calls robot.connect() on entry and robot.disconnect() on exit,
+    including when exceptions occur.
 
     Usage:
-        with managed(robot):
+        with connect(robot):
             obs = robot.get_observation()
             robot.send_action(action)
     """
@@ -255,15 +253,12 @@ import numpy as np
 class SO100:
     """Concrete implementation for the SO-100 robot arm."""
 
-    def __init__(self, port: str, cameras: dict | None = None):
+    def __init__(self, port: str):
         self.port = port
-        self.cameras = cameras or {}
         self._connection = None
 
     def connect(self) -> None:
         self._connection = serial.Serial(self.port, baudrate=1_000_000)
-        for cam in self.cameras.values():
-            cam.start()
 
     def disconnect(self) -> None:
         # Stop all motors before closing connection
@@ -271,18 +266,10 @@ class SO100:
             self._write_torque(enabled=False)
             self._connection.close()
             self._connection = None
-        for cam in self.cameras.values():
-            cam.stop()
 
     def get_observation(self) -> dict[str, Any]:
-        images = {
-            name: cam.read().data
-            for name, cam in self.cameras.items()
-        }
-        state = self._read_joint_positions()
         return {
-            "images": images,
-            "state": state,
+            "state": self._read_joint_positions(),
             "timestamp": time.monotonic(),
         }
 
@@ -290,7 +277,7 @@ class SO100:
         self._write_joint_positions(action)
 ```
 
-No base class imported. No registration. The class satisfies the `Robot` protocol by having the right methods.
+No base class imported. No registration. No cameras to manage. The class satisfies the `Robot` protocol by having the right methods.
 
 ### Third-Party Robots
 
@@ -323,13 +310,13 @@ This works with the `physicalai` runtime without modification:
 
 ```python
 from physicalai.inference import InferenceModel
-from physicalai.robots import managed
+from physicalai.robot import connect
 from my_package import MyCustomRobot
 
 model = InferenceModel("./my_policy")
 robot = MyCustomRobot(port="/dev/ttyUSB0")
 
-with managed(robot):
+with connect(robot):
     obs = robot.get_observation()
     action = model(obs)
     robot.send_action(action)
@@ -359,44 +346,75 @@ class BimanualRobot:
 left_robot = SO100(port="/dev/ttyUSB0")
 right_robot = SO100(port="/dev/ttyUSB1")
 
-with managed(left_robot), managed(right_robot):
+with connect(left_robot), connect(right_robot):
     ...
 ```
 
 ## Cameras
 
-Two patterns for camera integration:
+Cameras are managed **separately** from the robot interface. The robot handles joint state and actuation. Cameras are independent devices with their own lifecycle.
 
-### Robot-managed cameras
+### Why separate?
 
-Cameras are passed to the robot at construction. `get_observation()` returns images alongside joint state.
+- **Independent concerns.** You may want to read joint state without connecting cameras, e.g. for calibration or debugging.
+- **Shared cameras.** A camera may be shared across multiple robots (e.g., an overhead camera used by two arms in an ALOHA setup).
+- **Different frequencies.** Robot state and camera frames may need to be captured at different rates — joint state at 200Hz, images at 30Hz.
+- **Simpler robot implementations.** Robot drivers only deal with motor communication. No camera logic to complicate `connect()` / `disconnect()`.
 
-```python
-robot = SO100(
-    port="/dev/ttyUSB0",
-    cameras={"wrist": OpenCVCamera(index=0)},
-)
+### Recommended pattern: user assembles the observation
 
-with managed(robot):
-    obs = robot.get_observation()
-    # obs["images"]["wrist"] contains the camera frame
-```
-
-### User-managed cameras
-
-User reads cameras separately and assembles the observation dict:
+The user reads cameras and robot state separately, then assembles the observation dict that the policy expects:
 
 ```python
+from physicalai.robot import connect
+
 camera = OpenCVCamera(index=0)
 robot = SO100(port="/dev/ttyUSB0")
 
-with managed(robot):
+with connect(robot):
     frame = camera.read()
-    obs = robot.get_observation()
-    obs["images"] = {"wrist": frame.data}
+    robot_obs = robot.get_observation()
+
+    # Assemble the full observation for the policy
+    obs = {
+        "images": {"wrist": frame.data},
+        "state": robot_obs["state"],
+        "timestamp": robot_obs["timestamp"],
+    }
+    action = model(obs)
+    robot.send_action(action)
 ```
 
-The choice depends on the use case. Robot-managed cameras are simpler. User-managed cameras allow custom preprocessing or non-standard camera setups.
+This keeps the robot and camera fully independent. The user controls exactly what goes into the observation dict.
+
+### Alternative: combined robot + camera
+
+The Protocol is deliberately open — nothing prevents an implementation from managing cameras internally:
+
+```python
+class RobotWithCameras:
+    def __init__(self, cameras: dict):
+        self.cameras = cameras
+        ...
+
+    def get_observation(self) -> dict[str, Any]:
+        return {
+            "images": {name: cam.read() for name, cam in self.cameras.items()},
+            "state": self._read_joint_positions(),
+            "timestamp": time.monotonic(),
+        }
+```
+
+This works, but comes with trade-offs:
+
+| | Separate (recommended) | Combined |
+|---|---|---|
+| Camera shared across robots | Works naturally | Ambiguous ownership |
+| Different capture frequencies | Easy — read each at its own rate | Locked to `get_observation()` call rate |
+| Robot connect/disconnect | Only motors | Must also manage camera lifecycle |
+| Simplicity for simple setups | Slightly more user code | Fewer lines in the loop |
+
+We recommend the separate approach as the default. The combined approach is available for cases where simplicity in the loop is preferred and the trade-offs are acceptable.
 
 ## Validation
 
@@ -404,23 +422,33 @@ The robot does not describe its own capabilities. Instead, the policy's `manifes
 
 ### Manifest as source of truth
 
-The policy manifest already contains input/output specifications:
+The policy manifest declares expected hardware in dedicated `robot` and `camera` sections (see the [Manifest Format](inferencekit.md#manifest-format) for the full schema):
 
 ```json
 {
-    "policy": {
-        "kind": "ActionChunkingPolicy",
-        "control_frequency_hz": 50
-    },
-    "io": {
-        "inputs": {
-            "images.wrist": { "shape": [3, 480, 640], "dtype": "uint8" },
-            "state": { "shape": [6], "dtype": "float32" }
-        },
-        "outputs": {
-            "action": { "shape": [100, 6], "dtype": "float32" }
+    "format": "policy_package",
+    "version": "1.0",
+    "robots": [
+        {
+            "name": "main",
+            "type": "SO-100",
+            "state": { "shape": [6], "dtype": "float32" },
+            "action": { "shape": [6], "dtype": "float32" }
         }
-    }
+    ],
+    "cameras": [
+        {
+            "name": "wrist",
+            "shape": [3, 480, 640],
+            "dtype": "uint8"
+        },
+        {
+            "name": "top",
+            "shape": [3, 480, 640],
+            "dtype": "uint8"
+        }
+    ],
+    ...
 }
 ```
 
@@ -431,19 +459,20 @@ Before connecting to any hardware, a user can inspect what the policy needs:
 ```python
 model = InferenceModel("./my_policy")
 
-print(model.expected_inputs)
-# {'images.wrist': {'shape': [3, 480, 640], 'dtype': 'uint8'},
-#  'state': {'shape': [6], 'dtype': 'float32'}}
+print(model.expected_robot)
+# [{'name': 'main', 'type': 'SO-100',
+#   'state': {'shape': [6], 'dtype': 'float32'},
+#   'action': {'shape': [6], 'dtype': 'float32'}}]
 
-print(model.expected_outputs)
-# {'action': {'shape': [100, 6], 'dtype': 'float32'}}
+print(model.expected_cameras)
+# [{'name': 'wrist', 'shape': [3, 480, 640], 'dtype': 'uint8'}]
 
-# User reads this and knows: "I need a 6-DOF robot with a wrist camera at 480x640"
+# User reads this and knows: "I need an SO-100 (6-DOF) with a wrist camera at 480x640"
 ```
 
 ### First-contact: automatic validation
 
-On the first call to `model(obs)`, the runtime validates observation shapes against the manifest:
+On the first call to `model(obs)`, the runtime validates observation shapes against the manifest's `robot` and `camera` sections:
 
 ```python
 class InferenceModel:
@@ -454,86 +483,48 @@ class InferenceModel:
         return self._run(inputs)
 
     def _validate_inputs(self, inputs: dict) -> None:
-        for key, spec in self._manifest["io"]["inputs"].items():
-            value = self._resolve_key(inputs, key)
-            if value is None:
+        # Validate robot state
+        for robot_spec in self._manifest["robots"]:
+            name = robot_spec["name"]
+            state_spec = robot_spec["state"]
+            state = inputs.get("state")
+            if state is None:
                 raise IncompatibleInputError(
-                    f"Policy expects input '{key}' but it was not found "
-                    f"in the observation dict."
+                    f"Policy expects 'state' for robot '{name}' "
+                    f"but it was not found in the observation dict."
                 )
-            expected_shape = tuple(spec["shape"])
-            if value.shape != expected_shape:
+            expected_shape = tuple(state_spec["shape"])
+            if state.shape != expected_shape:
                 raise IncompatibleInputError(
-                    f"Policy expects '{key}' with shape {expected_shape} "
-                    f"but got {value.shape}. "
-                    f"Check that the robot matches the policy's training setup."
+                    f"Policy expects 'state' with shape {expected_shape} "
+                    f"(robot '{name}', type '{robot_spec.get('type', 'unknown')}') "
+                    f"but got {state.shape}."
                 )
 
-    def _resolve_key(self, inputs: dict, dotted_key: str):
-        """Resolve 'images.wrist' to inputs['images']['wrist']."""
-        obj = inputs
-        for part in dotted_key.split("."):
-            if isinstance(obj, dict) and part in obj:
-                obj = obj[part]
-            else:
-                return None
-        return obj
+        # Validate camera images
+        for cam_spec in self._manifest.get("cameras", []):
+            cam_name = cam_spec["name"]
+            image = (inputs.get("images") or {}).get(cam_name)
+            if image is None:
+                raise IncompatibleInputError(
+                    f"Policy expects camera '{cam_name}' but it was not "
+                    f"found in observation['images']."
+                )
+            expected_shape = tuple(cam_spec["shape"])
+            if image.shape != expected_shape:
+                raise IncompatibleInputError(
+                    f"Camera '{cam_name}' expected shape {expected_shape} "
+                    f"but got {image.shape}."
+                )
 ```
 
-This validates at the boundary between robot and policy — the natural place where mismatches surface. No robot descriptor needed. No configuration files to maintain. The manifest is the single source of truth, and reality is checked against it.
-
-## Frequency Control
-
-The runtime episode loop owns frequency control, not the robot. The target frequency comes from the policy manifest:
-
-```python
-# Inside physicalai.runtime episode loop
-target_dt = 1.0 / manifest["policy"]["control_frequency_hz"]
-
-while running:
-    t_start = time.monotonic()
-
-    obs = robot.get_observation()
-    action = model(obs)
-    robot.send_action(action)
-
-    elapsed = time.monotonic() - t_start
-    sleep_time = target_dt - elapsed
-    if sleep_time > 0:
-        time.sleep(sleep_time)
-    else:
-        log.warning(
-            f"Loop overrun: {elapsed:.3f}s > {target_dt:.3f}s. "
-            f"Inference may be too slow for the target frequency."
-        )
-```
-
-When inference is slower than the target frequency, action chunking runners can compensate by executing multiple pre-computed actions between inference calls. This is handled at the runner level, not the robot level.
+This validates at the boundary between robot and policy — the natural place where mismatches surface. Robot state and camera images are validated separately with clear, targeted error messages. The manifest is the single source of truth, and reality is checked against it.
 
 ## Async and Concurrency
 
 The Protocol is synchronous. All methods block until complete.
 
-This is a deliberate choice. A robot control loop at 10-50Hz with 1-3 I/O sources does not benefit from `asyncio`. If an implementation needs internal concurrency (e.g., reading multiple cameras in parallel), it uses threads inside its own methods:
-
-```python
-class MultiCameraRobot:
-    def get_observation(self) -> dict[str, Any]:
-        with ThreadPoolExecutor() as pool:
-            futures = {
-                name: pool.submit(cam.read)
-                for name, cam in self.cameras.items()
-            }
-            images = {
-                name: f.result().data
-                for name, f in futures.items()
-            }
-        return {
-            "images": images,
-            "state": self._read_joints(),
-            "timestamp": time.monotonic(),
-        }
-```
+This is a deliberate choice. A robot control loop at 10-50Hz with 1-3 I/O sources does not benefit from `asyncio`. If an implementation needs internal concurrency (e.g., reading multiple sensors in parallel), it uses threads inside its own methods.
 
 The sync Protocol enforces this at the type-checking level. An `async def get_observation()` has a different return type (`Coroutine`) and will be flagged by `mypy` as incompatible with the Protocol.
 
@@ -599,8 +590,9 @@ def check_robot_conformance(robot, num_steps: int = 10):
 |---|---|
 | Interface mechanism | `Protocol` (structural typing, no inheritance) |
 | Data types | `dict[str, Any]` for observations, `np.ndarray` for actions |
-| Context manager | `managed()` wrapper function |
+| Context manager | `connect()` wrapper function |
 | Safety | `disconnect()` must leave robot stationary (documented contract, conformance test) |
+| Cameras | Separate from robot interface; user assembles observation |
 | Concurrency | Synchronous protocol, threads allowed internally |
 | Validation | Policy manifest is source of truth, validated on first observation |
 | Frequency control | Runtime episode loop, target from manifest |

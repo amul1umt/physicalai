@@ -1,18 +1,53 @@
 # Robot Interface Design
 
-## Executive Summary
+## Overview
 
-This document proposes adding a `Robot` interface to the physicalai runtime to enable programmatic robot control for inference and deployment. Today, robot interaction is only available through the Application backend. Users wanting to run trained policies on real robots must either run the full Application stack or build custom glue.
+The robot interface defines how `physicalai` communicates with physical robots during inference deployment. It is deliberately minimal — the robot is plumbing in service of the inference loop, not the product itself.
 
-The proposed design:
+The interface uses Python's `Protocol` for structural typing. Robot implementations do not inherit from a base class. They implement the required methods, and duck typing handles the rest.
 
-- Adds a **framework-agnostic** `Robot` abstract base class to the library
-- Uses standard Python types (`dict`, `np.ndarray`) at the core for maximum portability
-- Keeps the core package inference‑first and dependency‑free
-- Wraps vendor SDKs with thin adapters (optional extras)
-- Shares the interface between Library and Application
+### The Interface
 
-This enables a simple deployment workflow: `pip install physicalai[robots]`, then run inference on real robots with ~10 lines of Python.
+Four methods. No base class.
+
+```python
+class Robot(Protocol):
+    def connect(self) -> None: ...
+    def disconnect(self) -> None: ...
+    def get_observation(self) -> dict[str, Any]: ...
+    def send_action(self, action: np.ndarray) -> None: ...
+```
+
+Any class that implements these four methods is a valid robot. No inheritance, no registration, no dependency on `physicalai`.
+
+### Usage
+
+Cameras and robot state are read separately, then assembled into the observation the policy expects:
+
+```python
+from physicalai.inference import InferenceModel
+from physicalai.robot import connect
+from physicalai.capture import OpenCVCamera
+from robots import SO100
+
+model = InferenceModel("./my_policy")
+robot = SO100(port="/dev/ttyUSB0")
+camera = OpenCVCamera(index=0)
+
+with connect(robot):
+    robot_obs = robot.get_observation()
+    frame = camera.read()
+
+    obs = {
+        "images": {"wrist": frame.data},
+        "state": robot_obs["state"],
+        "timestamp": robot_obs["timestamp"],
+    }
+    action = model(obs)
+    robot.send_action(action)
+```
+
+A combined robot+camera approach is also possible. See [Cameras](#cameras) for trade-offs.
 
 ---
 
@@ -20,16 +55,16 @@ This enables a simple deployment workflow: `pip install physicalai[robots]`, the
 
 ### Framework Landscape
 
-physicalai provides the inference core, export pipeline, and runtime orchestration. What's missing: a library‑level robot hardware interface that can be used without the Application.
+physicalai provides the inference core, export pipeline, and runtime orchestration. What's missing: a library-level robot hardware interface that can be used without the Application.
 
 ### Current Architecture
 
 The system has two packages:
 
-| Package                                           | Purpose                             | Target Users                                                  |
-| ------------------------------------------------- | ----------------------------------- | ------------------------------------------------------------- |
-| **Library** (`pip install physicalai`)            | Inference, deployment              | ML researchers, robotics engineers                            |
-| **Application** (Studio)                          | Data collection, teleoperation, GUI | Subject matter experts such as Lab operators, non-programmers |
+| Package | Purpose | Target Users |
+|---|---|---|
+| **Library** (`pip install physicalai`) | Inference, deployment | ML researchers, robotics engineers |
+| **Application** (Studio) | Data collection, teleoperation, GUI | Subject matter experts such as Lab operators, non-programmers |
 
 The library handles inference and deployment. The application handles human interaction. Robot control currently exists only in the Application, tightly coupled to its backend.
 
@@ -37,428 +72,556 @@ The library handles inference and deployment. The application handles human inte
 
 A robotics engineer who exports a policy to ONNX/OpenVINO cannot easily deploy it:
 
-| Current Options         | Problem             |
-| ----------------------- | ------------------- |
+| Current Options | Problem |
+|---|---|
 | Run Application backend | Requires web server |
-| Write custom glue code  | Duplicates effort   |
+| Write custom glue code | Duplicates effort |
 
 ---
 
 ## Design Principles
 
-### Framework Agnosticism
+### Protocol, Not Inheritance
 
-The Robot interface must be usable in any inference runtime:
+The interface uses `Protocol` (structural typing), not an Abstract Base Class. Implementations are plain classes that have the right methods. No base class to subclass, no import from `physicalai` required for third-party robots.
 
-- **Core inference loops** - Plain Python dicts and numpy arrays
-- **ROS/ROS2** - Standard message types
-- **Custom pipelines** - Plain Python dicts and numpy arrays
+### Standard Python Types
 
-This is achieved through:
+Observations are `dict[str, Any]`, actions are `np.ndarray`. No custom message types, no protobuf, no ROS messages. This ensures maximum portability — works with any inference runtime, any framework.
 
-1. **Core interface uses standard types** (`dict`, `np.ndarray`) - no framework imports required
-2. **Optional adapters** live outside the core package (no circular dependencies)
-3. **Lazy imports** for vendor SDKs and adapters
+`numpy` is used over torch because it is universally available, makes no GPU assumptions, is expected by robot SDKs, and conversion to/from torch is zero-copy (`torch.from_numpy()` / `.numpy()`).
 
-### Decoupled Camera Handling
+### Synchronous
 
-The Robot ABC does **not** depend on Camera types. Instead:
+All methods are blocking. A robot control loop at 10–50Hz with 1–3 I/O sources does not benefit from `asyncio`. If an implementation needs async I/O internally (e.g., for cameras), it bridges to sync at the boundary. An `async def get_observation()` has a different return type (`Coroutine`) and will be flagged by `mypy` as incompatible with the Protocol.
 
-- Robot ABC accepts camera configurations as `dict[str, dict[str, Any]]`
-- Robot implementations (e.g., SO101) accept **both** config dicts and Camera objects
-- Internal normalization converts Camera objects to config dicts
+### Validation via Manifest
 
-This ensures the base interface remains portable while providing convenience for adapter packages.
+The robot does not describe itself. The policy's `manifest.json` declares what it expects. The runtime validates observations against the manifest on first contact. See the [Validation](#validation) section below.
 
-### Multi-Robot vs Multi-Arm
+### Safe Disconnect
 
-This design distinguishes **multiple robots** from **multi-arm robots**:
+`disconnect()` must leave the robot in a safe, stationary state. Motors must be stopped or holding position before the connection is closed. This is a contractual requirement on every implementation, verified by the [conformance test suite](#conformance-testing).
 
-- **Multiple robots**: use **multiple `Robot` instances**. Each robot has its own connection lifecycle and produces its own observation/action space. Coordination happens at the application level (e.g., teleoperation leader/follower or a fleet controller).
-- **Multi-arm robot**: use **one `Robot` subclass** that internally manages multiple hardware connections but exposes a single observation/action interface.
+### Rationale: Why Protocol
 
-This keeps the API simple while allowing explicit composition where needed.
-
-### Multi-Robot vs Multi-Arm
-
-This design distinguishes **multiple robots** from **multi-arm robots**:
-
-- **Multiple robots**: use **multiple `Robot` instances**. Each robot has its own connection lifecycle and produces its own observation/action space. Coordination happens at the application level (e.g., teleoperation leader/follower or a fleet controller).
-- **Multi-arm robot**: use **one `Robot` subclass** that internally manages multiple hardware connections but exposes a single observation/action interface.
-
-This keeps the API simple while allowing explicit composition where needed.
+Protocols provide zero coupling for third parties (no import needed), avoid MRO conflicts when combining multiple robotics libraries, work directly with standard mocking tools, and support forward-compatible extension via separate Protocols (existing code stays untouched when new capabilities are added). The trade-off: no `TypeError` at class definition time if a method is missing — errors surface when the runtime calls the missing method. This is acceptable because the conformance test suite catches missing methods immediately, and static type checkers (`mypy`, `pyright`) flag Protocol violations before runtime.
 
 ---
 
-## Proposed Design
+## Protocol Definition
 
-We design a `Robot` interface in the library, following the same patterns as our policy interface, where we could have both first party robot wrappers and third party robot integrations via vendor SDKs.
+```python
+# physicalai/robot/protocol.py
+from typing import Any, Protocol
+import numpy as np
 
-### Target Workflow
 
-```bash
-pip install physicalai[robots]
+class Robot(Protocol):
+    """Structural interface for robot implementations.
+
+    Any class that implements these four methods is a valid robot.
+    No inheritance required. No registration required.
+    """
+
+    def connect(self) -> None:
+        """Establish connection to the robot hardware.
+
+        Called once before the inference loop begins. Must be idempotent —
+        calling connect() on an already-connected robot should be a no-op
+        or raise a clear error.
+        """
+        ...
+
+    def disconnect(self) -> None:
+        """Disconnect from the robot.
+
+        Implementations MUST leave the robot in a safe, stationary state.
+        Motors must be stopped or holding position before the connection
+        is closed. This method is called automatically by the connect()
+        context manager, including when exceptions occur.
+        """
+        ...
+
+    def get_observation(self) -> dict[str, Any]:
+        """Read the current robot state.
+
+        Returns a dict with the following conventional structure:
+
+            {
+                "state": np.ndarray,            # joint positions, gripper, etc.
+                "timestamp": float,             # time.monotonic() or equivalent
+            }
+
+        The exact keys and shapes must match what the policy expects,
+        as declared in the policy's manifest.json under io.inputs.
+
+        Note: cameras are managed separately from the robot interface.
+        See the Cameras section for how to combine robot state and
+        camera frames into a full observation for the policy.
+        """
+        ...
+
+    def send_action(self, action: np.ndarray) -> None:
+        """Send an action command to the robot.
+
+        Args:
+            action: A numpy array of joint commands. The shape and semantics
+                    (positions, velocities, torques) depend on the policy
+                    that produced the action. The robot implementation is
+                    responsible for interpreting them correctly.
+        """
+        ...
 ```
+
+---
+
+## Context Manager
+
+The Protocol cannot provide default method implementations. Instead, `physicalai` ships a `connect()` context manager (like `open()` for files):
+
+```python
+# physicalai/robot/utils.py
+from contextlib import contextmanager
+
+
+@contextmanager
+def connect(robot):
+    """Context manager for safe robot lifecycle.
+
+    Calls robot.connect() on entry and robot.disconnect() on exit,
+    including when exceptions occur.
+
+    Usage:
+        with connect(robot):
+            obs = robot.get_observation()
+            robot.send_action(action)
+    """
+    robot.connect()
+    try:
+        yield robot
+    finally:
+        robot.disconnect()
+```
+
+---
+
+## Implementing a Robot
+
+Adding a new robot is straightforward. Implement the four methods:
+
+```python
+# physicalai/robot/so100.py
+import time
+import numpy as np
+
+
+class SO100:
+    """Concrete implementation for the SO-100 robot arm."""
+
+    def __init__(self, port: str):
+        self.port = port
+        self._connection = None
+
+    def connect(self) -> None:
+        self._connection = serial.Serial(self.port, baudrate=1_000_000)
+
+    def disconnect(self) -> None:
+        # Stop all motors before closing connection
+        if self._connection:
+            self._write_torque(enabled=False)
+            self._connection.close()
+            self._connection = None
+
+    def get_observation(self) -> dict[str, Any]:
+        return {
+            "state": self._read_joint_positions(),
+            "timestamp": time.monotonic(),
+        }
+
+    def send_action(self, action: np.ndarray) -> None:
+        self._write_joint_positions(action)
+```
+
+No base class imported. No registration. No cameras to manage. The class satisfies the `Robot` protocol by having the right methods.
+
+### Third-Party Robots
+
+Third-party implementations follow the same pattern. They do not need to import anything from `physicalai`:
+
+```python
+# In a user's own code or separate package
+
+class MyCustomRobot:
+    def connect(self) -> None:
+        # custom hardware setup
+        ...
+
+    def disconnect(self) -> None:
+        # stop motors, close connection
+        ...
+
+    def get_observation(self) -> dict[str, Any]:
+        return {
+            "state": np.array([...]),
+            "timestamp": time.monotonic(),
+        }
+
+    def send_action(self, action: np.ndarray) -> None:
+        # send commands to hardware
+        ...
+```
+
+This works with the `physicalai` runtime without modification:
 
 ```python
 from physicalai.inference import InferenceModel
-from physicalai.robot import SO101
+from physicalai.robots import connect
+from my_package import MyCustomRobot
 
-policy = InferenceModel.load("./exports/act_policy")
-robot = SO101.from_config("robot.yaml")
+model = InferenceModel("./my_policy")
+robot = MyCustomRobot(port="/dev/ttyUSB0")
 
-with robot:
-    policy.reset()
-    while True:
-        obs = robot.get_observation()  # Returns dict by default
-        action = policy.select_action(obs)
-        robot.send_action(action)
+with connect(robot):
+    obs = robot.get_observation()
+    action = model(obs)
+    robot.send_action(action)
 ```
 
-Library-as-building-blocks. No web server required.
+---
 
-### Robot ABC
+## Multi-Arm vs Multi-Robot
+
+**Multi-arm** (e.g., bimanual robot): A single class with wider state and action vectors. Both arms are one robot.
 
 ```python
-# physical_ai/robots/base.py
-from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Any, Self
+class BimanualRobot:
+    def get_observation(self) -> dict[str, Any]:
+        return {
+            "state": np.concatenate([left_joints, right_joints]),  # (14,)
+            "timestamp": time.monotonic(),
+        }
 
-import numpy as np
+    def send_action(self, action: np.ndarray) -> None:
+        left_action = action[:7]
+        right_action = action[7:]
+        ...
+```
 
-class Robot(ABC):
-    """Abstract interface for robot hardware.
+From the policy's perspective, this is one robot with one observation space and one action space. The implementation manages multiple hardware connections internally. Camera naming should be explicit and collision-free (e.g., `wrist_left`, `wrist_right`, `overhead`).
 
-    Framework-agnostic by default, with optional format conversion.
+**Ordering rule**: left-arm first, right-arm second, unless a robot defines a different explicit order in its documentation.
 
-    Design Principles:
-        - Core methods use standard Python types (dict, np.ndarray)
-        - Follows hparams-first design with from_config() classmethod
-        - Context manager for safe resource management
-    """
+**Multiple independent robots**: Multiple instances, managed separately.
 
-    # === Configuration ===
+```python
+left_robot = SO100(port="/dev/ttyUSB0")
+right_robot = SO100(port="/dev/ttyUSB1")
 
-    @classmethod
-    @abstractmethod
-    def from_config(cls, config: str | Path | dict[str, Any]) -> Self:
-        """Create robot from configuration.
+with connect(left_robot), connect(right_robot):
+    ...
+```
 
-        Args:
-            config: Path to YAML/JSON file, or config dict.
+Coordination between independent robots is handled at the application level (e.g., teleoperation leader/follower or a fleet controller), not by the robot interface.
 
-        Returns:
-            Configured Robot instance (not yet connected).
-        """
+---
 
-    @property
-    @abstractmethod
-    def id(self) -> str:
-        """Stable identifier for this robot instance.
+## Cameras
 
-        Used for logging, telemetry, and routing in multi-robot scenarios.
-        Must be unique within an application process.
-        """
+Cameras are managed **separately** from the robot interface. The robot handles joint state and actuation. Cameras are independent devices with their own lifecycle.
 
-    @property
-    @abstractmethod
-    def id(self) -> str:
-        """Stable identifier for this robot instance.
+### Why Separate?
 
-        Used for logging, telemetry, and routing in multi-robot scenarios.
-        Must be unique within an application process.
-        """
+- **Independent concerns.** You may want to read joint state without connecting cameras, e.g., for calibration or debugging.
+- **Shared cameras.** A camera may be shared across multiple robots (e.g., an overhead camera used by two arms in an ALOHA setup).
+- **Different frequencies.** Robot state and camera frames may need to be captured at different rates — joint state at 200Hz, images at 30Hz.
+- **Simpler robot implementations.** Robot drivers only deal with motor communication. No camera logic to complicate `connect()` / `disconnect()`.
 
-    # === Connection Lifecycle ===
+### Recommended Pattern: User Assembles the Observation
 
-    @abstractmethod
-    def connect(self) -> None:
-        """Establish connection to robot hardware."""
+The user reads cameras and robot state separately, then assembles the observation dict that the policy expects:
 
-    @abstractmethod
-    def disconnect(self) -> None:
-        """Safely disconnect from robot."""
+```python
+from physicalai.robots import connect
 
-    @property
-    @abstractmethod
-    def is_connected(self) -> bool:
-        """Connection status."""
+camera = OpenCVCamera(index=0)
+robot = SO100(port="/dev/ttyUSB0")
 
-    # === Observation ===
+with connect(robot):
+    frame = camera.read()
+    robot_obs = robot.get_observation()
+
+    obs = {
+        "images": {"wrist": frame.data},
+        "state": robot_obs["state"],
+        "timestamp": robot_obs["timestamp"],
+    }
+    action = model(obs)
+    robot.send_action(action)
+```
+
+### Alternative: Combined Robot + Camera
+
+The Protocol is deliberately open — nothing prevents an implementation from managing cameras internally:
+
+```python
+class RobotWithCameras:
+    def __init__(self, cameras: dict):
+        self.cameras = cameras
+        ...
 
     def get_observation(self) -> dict[str, Any]:
-        """Read current robot state.
-
-        Returns:
-            Observation in requested format. Default dict structure:
-                {
-                    "images": {"camera_name": np.ndarray (HWC, uint8)},
-                    "state": np.ndarray (joint positions),
-                    "timestamp": float (optional),
-                }
-        """
-        ...
-
-    # === Action ===
-
-    @abstractmethod
-    def send_action(self, action: np.ndarray) -> None:
-        """Execute action on robot.
-
-        Args:
-            action: Joint positions/velocities as numpy array.
-        """
-        ...
-
-    # === Timing & Synchronization ===
-
-    def get_timestamp(self) -> float:
-        """Return the last observation timestamp in monotonic seconds.
-
-        Composite robots should return a synchronized timestamp for the
-        aggregated observation (e.g., max of per-arm capture times).
-        """
-        raise NotImplementedError
-
-    # === Timing & Synchronization ===
-
-    def get_timestamp(self) -> float:
-        """Return the last observation timestamp in monotonic seconds.
-
-        Composite robots should return a synchronized timestamp for the
-        aggregated observation (e.g., max of per-arm capture times).
-        """
-        raise NotImplementedError
-
-    # === Context Manager ===
-
-    def __enter__(self) -> Self:
-        self.connect()
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self.disconnect()
+        return {
+            "images": {name: cam.read() for name, cam in self.cameras.items()},
+            "state": self._read_joint_positions(),
+            "timestamp": time.monotonic(),
+        }
 ```
 
-### Observation Conversion (Adapters)
+| | Separate (recommended) | Combined |
+|---|---|---|
+| Camera shared across robots | Works naturally | Ambiguous ownership |
+| Different capture frequencies | Easy — read each at its own rate | Locked to `get_observation()` call rate |
+| Robot connect/disconnect | Only motors | Must also manage camera lifecycle |
+| Simplicity for simple setups | Slightly more user code | Fewer lines in the loop |
 
-The core API only guarantees a plain dict. Framework-specific formats must be provided by **adapter packages** outside the core to avoid circular dependencies. Adapters can expose helper functions or wrapper classes that convert the dict format into framework-specific types.
-
-### Wrapper Architecture
-
-The design mirrors our policy wrappers:
-
-| Layer             | Policies   | Robots           |
-| ----------------- | ---------- | ---------------- |
-| Universal wrapper | (optional) | `VendorRobot`    |
-| Specific wrappers | (optional) | `SO101`, `Aloha` |
-| External SDKs     | (varies)   | vendor SDKs      |
-
-**Universal wrapper** provides flexibility:
-
-```python
-class VendorRobot(Robot):
-    """Universal wrapper for a vendor robot family.
-
-    Accepts robot_type + explicit kwargs for a vendor SDK.
-    """
-
-    def __init__(
-        self,
-        robot_type: str,
-        *,
-        id: str = "robot",
-        cameras: dict[str, dict[str, Any]] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        """Initialize vendor robot wrapper.
-
-        Args:
-            robot_type: Vendor-specific robot type.
-            id: Robot identifier.
-            cameras: Camera configurations as dicts.
-            **kwargs: Additional robot-specific parameters.
-        """
-        ...
-
-    @classmethod
-    def from_config(cls, config: str | Path | dict[str, Any]) -> Self:
-        ...
-
-    def connect(self) -> None:
-        ...
-
-    def disconnect(self) -> None:
-        ...
-
-    @property
-    def is_connected(self) -> bool:
-        ...
-
-    def send_action(self, action: np.ndarray) -> None:
-        ...
-```
-
-**Specific wrappers** provide IDE autocomplete and accept Camera objects:
-
-```python
-# physical_ai/robots/vendor/so101.py
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from physicalai.capture import Camera
-
-class SO101(VendorRobot):
-    """SO-101 robot with explicit parameters for IDE support."""
-
-    def __init__(
-        self,
-        *,
-        id: str = "so101",
-        port: str = "/dev/ttyUSB0",
-        cameras: dict[str, dict[str, Any] | "Camera"] | None = None,
-        disable_torque_on_disconnect: bool = True,
-        max_relative_target: float | dict[str, float] | None = None,
-    ) -> None:
-        """Initialize SO-101 robot.
-
-        Args:
-            id: Robot identifier.
-            port: Serial port for robot connection.
-            cameras: Camera configurations. Accepts:
-                - Config dicts: {"top": {"type": "webcam", "index": 0}}
-                - Camera objects: {"top": Webcam(index=0)}
-                - Mixed: {"top": {...}, "wrist": RealSense(...)}
-            disable_torque_on_disconnect: Whether to disable torque on disconnect.
-            max_relative_target: Maximum relative target for joint positions.
-        """
-        ...
-```
-
-### Camera Integration
-
-Robot implementations accept **both** config dicts and Camera objects:
-
-```python
-# Config dicts (framework agnostic)
-robot = SO101(
-    cameras={
-        "top": {"type": "webcam", "index": 0, "width": 640},
-        "wrist": {"type": "realsense", "serial": "123456"},
-    }
-)
-
-# Camera objects (native)
-from physicalai.capture import OpenCVCamera, RealSenseCamera
-
-robot = SO101(
-    cameras={
-        "top": OpenCVCamera(index=0, width=640),
-        "wrist": RealSenseCamera(serial_number="123456"),
-    }
-)
-
-# Mixed (both work together)
-robot = SO101(
-    cameras={
-        "top": {"type": "webcam", "index": 0},
-        "wrist": RealSenseCamera(serial_number="123456"),
-    }
-)
-```
-
-Internally, Camera objects are normalized to config dicts before passing to the underlying SDK. This maintains framework agnosticism at the base level while providing convenience for adapter packages.
-
-**Camera naming guidance**: Use explicit, collision-free names in multi-arm setups (e.g., `wrist_left`, `wrist_right`, `overhead`). Avoid ambiguous names like `wrist` when multiple arms are present.
+We recommend the separate approach as the default. The combined approach is available for cases where simplicity in the loop is preferred and the trade-offs are acceptable.
 
 See [Camera Interface Design](./camera-interface.md) for the full Camera specification.
 
-### Supported Robots
+---
 
-All implementations wrap pip-installable SDKs where available:
+## Validation
 
-| Vendor           | SDK              | Installation                 |
-| ---------------- | ---------------- | ---------------------------- |
-| Universal Robots | `ur_rtde`        | `pip install ur_rtde`        |
-| ABB              | `abb_librws`     | `pip install abb-librws`     |
-| Franka (Panda)   | `frankx`         | `pip install frankx`         |
-| KUKA             | `py-openshowvar` | `pip install py-openshowvar` |
+The robot does not describe its own capabilities. Instead, the policy's `manifest.json` declares what it expects, and the runtime validates against reality.
 
-No vendored code—thin wrappers only.
+### Manifest as Source of Truth
+
+The policy manifest declares expected hardware in dedicated `robot` and `camera` sections (see the [Manifest Format](inferencekit.md#manifest-format) for the full schema):
+
+```json
+{
+    "format": "policy_package",
+    "version": "1.0",
+    "robots": [
+        {
+            "name": "main",
+            "type": "SO-100",
+            "state": { "shape": [6], "dtype": "float32" },
+            "action": { "shape": [6], "dtype": "float32" }
+        }
+    ],
+    "cameras": [
+        {
+            "name": "wrist",
+            "shape": [3, 480, 640],
+            "dtype": "uint8"
+        },
+        {
+            "name": "top",
+            "shape": [3, 480, 640],
+            "dtype": "uint8"
+        }
+    ]
+}
+```
+
+### Pre-Connection: Inspect Policy Requirements
+
+Before connecting to any hardware, a user can inspect what the policy needs:
+
+```python
+model = InferenceModel("./my_policy")
+
+print(model.expected_robot)
+# [{'name': 'main', 'type': 'SO-100',
+#   'state': {'shape': [6], 'dtype': 'float32'},
+#   'action': {'shape': [6], 'dtype': 'float32'}}]
+
+print(model.expected_cameras)
+# [{'name': 'wrist', 'shape': [3, 480, 640], 'dtype': 'uint8'}]
+```
+
+### First-Contact: Automatic Validation
+
+On the first call to `model(obs)`, the runtime validates observation shapes against the manifest:
+
+```python
+class InferenceModel:
+    def __call__(self, inputs: dict) -> dict:
+        if not self._validated:
+            self._validate_inputs(inputs)
+            self._validated = True
+        return self._run(inputs)
+
+    def _validate_inputs(self, inputs: dict) -> None:
+        # Validate robot state
+        for robot_spec in self._manifest["robots"]:
+            name = robot_spec["name"]
+            state_spec = robot_spec["state"]
+            state = inputs.get("state")
+            if state is None:
+                raise IncompatibleInputError(
+                    f"Policy expects 'state' for robot '{name}' "
+                    f"but it was not found in the observation dict."
+                )
+            expected_shape = tuple(state_spec["shape"])
+            if state.shape != expected_shape:
+                raise IncompatibleInputError(
+                    f"Policy expects 'state' with shape {expected_shape} "
+                    f"(robot '{name}', type '{robot_spec.get('type', 'unknown')}') "
+                    f"but got {state.shape}."
+                )
+
+        # Validate camera images
+        for cam_spec in self._manifest.get("cameras", []):
+            cam_name = cam_spec["name"]
+            image = (inputs.get("images") or {}).get(cam_name)
+            if image is None:
+                raise IncompatibleInputError(
+                    f"Policy expects camera '{cam_name}' but it was not "
+                    f"found in observation['images']."
+                )
+            expected_shape = tuple(cam_spec["shape"])
+            if image.shape != expected_shape:
+                raise IncompatibleInputError(
+                    f"Camera '{cam_name}' expected shape {expected_shape} "
+                    f"but got {image.shape}."
+                )
+```
+
+---
+
+## Conformance Testing
+
+`physicalai` ships a test utility that robot implementers can run against their implementation:
+
+```python
+# physicalai/robot/testing.py
+import time
+import numpy as np
+
+
+def check_robot_conformance(robot, num_steps: int = 10):
+    """Verify a robot implementation satisfies the Protocol contract.
+
+    Checks:
+    - connect/disconnect lifecycle
+    - get_observation returns the expected dict structure
+    - send_action accepts a numpy array
+    - disconnect leaves the robot stationary
+    """
+    # Lifecycle
+    robot.connect()
+
+    # Observation structure
+    obs = robot.get_observation()
+    assert isinstance(obs, dict), "get_observation() must return a dict"
+    assert "state" in obs, "observation must contain 'state'"
+    assert isinstance(obs["state"], np.ndarray), "state must be np.ndarray"
+    assert "timestamp" in obs, "observation must contain 'timestamp'"
+    assert isinstance(obs["timestamp"], (int, float)), "timestamp must be numeric"
+
+    if "images" in obs:
+        assert isinstance(obs["images"], dict), "images must be a dict"
+        for name, img in obs["images"].items():
+            assert isinstance(img, np.ndarray), f"image '{name}' must be np.ndarray"
+            assert img.ndim == 3, f"image '{name}' must be 3D (C, H, W)"
+
+    # Action
+    state_dim = obs["state"].shape[0]
+    action = np.zeros(state_dim, dtype=np.float32)
+    robot.send_action(action)
+
+    # Safe disconnect
+    robot.disconnect()
+    robot.connect()
+    obs1 = robot.get_observation()
+    time.sleep(0.1)
+    obs2 = robot.get_observation()
+    assert np.allclose(obs1["state"], obs2["state"], atol=0.01), (
+        "Robot must be stationary after disconnect(). "
+        f"State changed from {obs1['state']} to {obs2['state']}"
+    )
+    robot.disconnect()
+
+    print("All conformance checks passed.")
+```
+
+---
+
+## Async and Concurrency
+
+The Protocol is synchronous. All methods block until complete.
+
+This is a deliberate choice. A robot control loop at 10–50Hz with 1–3 I/O sources does not benefit from `asyncio`. If an implementation needs internal concurrency (e.g., reading multiple sensors in parallel), it uses threads inside its own methods and returns synchronously at the boundary.
+
+The sync Protocol enforces this at the type-checking level. An `async def get_observation()` has a different return type (`Coroutine`) and will be flagged by `mypy` as incompatible with the Protocol.
 
 ---
 
 ## Usage Patterns
 
-### Pattern 1: Framework-Agnostic (Default)
-
-```python
-from physicalai.robot import SO101
-
-robot = SO101.from_config("robot.yaml")
-
-with robot:
-    # Pure dict/numpy - works with any framework
-    obs = robot.get_observation()
-    action = my_policy(obs["images"], obs["state"])
-    robot.send_action(action)
-```
-
-### Pattern 2: Framework Adapter (Optional)
+### Pattern 1: Library (Default)
 
 ```python
 from physicalai.inference import InferenceModel
-from physicalai.robot import SO101
+from physicalai.robots import connect
+from physicalai.robots import SO100
 
-policy = InferenceModel.load("./exports/act_policy")
-robot = SO101.from_config("robot.yaml")
+model = InferenceModel("./my_policy")
+robot = SO100(port="/dev/ttyUSB0")
 
-with robot:
-    policy.reset()
-    for _ in range(1000):
-        obs = robot.get_observation()  # dict
-        action = policy.select_action(obs)
-        robot.send_action(action)
-```
-
-### Pattern 3: External Adapter (Optional)
-
-```python
-from physicalai.robot import SO101
-
-robot = SO101.from_config("robot.yaml")
-
-with robot:
-    # Adapter-specific conversion handled outside core
+with connect(robot):
     obs = robot.get_observation()
-    action = external_policy.select_action(obs)
+    action = model(obs)
     robot.send_action(action)
 ```
 
-### Pattern 4: CLI
+### Pattern 2: CLI
+
+The model's `manifest.json` provides robot type, state/action shapes, and camera requirements. The user supplies hardware connection details via `--port`/`--device` flags or a local config file (flags override config):
 
 ```bash
+# Port flag
 physical-ai infer \
-    --model ./exports/openvino \
-    --robot so101 \
-    --robot-config robot.yaml \
+    --model ./exports/act_policy \
+    --port /dev/ttyUSB0 \
+    --episodes 10
+
+# Local config file
+physical-ai infer \
+    --model ./exports/act_policy \
+    --hardware-config hardware.yaml \
+    --episodes 10
+
+# Flag overrides config
+physical-ai infer \
+    --model ./exports/act_policy \
+    --hardware-config hardware.yaml \
+    --port /dev/ttyUSB1 \
     --episodes 10
 ```
 
-### Pattern 5: Application Integration
+### Pattern 3: Application Integration
 
-Application imports the same interface:
+The Application imports the same interface:
 
 ```python
 # application/backend/src/workers/inference_worker.py
 from physicalai.inference import InferenceModel
-from physicalai.robot import Robot, SO101
+from physicalai.robots import connect
 
 class InferenceWorker:
-    def __init__(self, robot: Robot, model_path: str):
+    def __init__(self, robot, model_path: str):
         self.robot = robot
-        self.policy = InferenceModel.load(model_path)
+        self.policy = InferenceModel(model_path)
+
+    def run_episode(self):
+        with connect(self.robot):
+            obs = self.robot.get_observation()
+            action = self.policy(obs)
+            self.robot.send_action(action)
 ```
 
 One interface, multiple usage patterns.
@@ -468,22 +631,14 @@ One interface, multiple usage patterns.
 ## File Structure
 
 ```text
-library/src/physical_ai/
-├── robots/                      # NEW
+src/physicalai/
+├── robot/
 │   ├── __init__.py              # Public API exports
-│   ├── base.py                  # Robot ABC
-│   ├── vendor/                  # Vendor-wrapped robots
-│   │   ├── __init__.py
-│   │   ├── universal.py         # VendorRobot (universal)
-│   │   ├── so101.py             # SO101 (explicit args)
-│   │   ├── aloha.py             # Aloha (explicit args)
-│   │   └── koch.py              # Koch (explicit args)
-│   ├── ur/                      # Universal Robots
-│   │   ├── __init__.py
-│   │   └── ur5e.py
-│   └── abb/                     # ABB
-│       ├── __init__.py
-│       └── irb.py
+│   ├── protocol.py              # Robot Protocol definition
+│   ├── utils.py                 # connect() context manager
+│   ├── testing.py               # check_robot_conformance()
+│   ├── so100.py                 # SO-100 implementation
+│   └── ...                      # Other concrete implementations
 └── ...
 ```
 
@@ -493,228 +648,94 @@ library/src/physical_ai/
 
 ```toml
 # pyproject.toml
-[project.optional-dependencies]
-ur = ["ur_rtde>=1.5.0"]
-abb = ["abb-librws>=1.0.0"]
-franka = ["frankx>=0.3.0"]
-robots = ["ur_rtde", "abb-librws", "frankx"]
+[project]
+dependencies = [
+    "numpy>=1.24",
+]
 ```
 
+The core interface requires only numpy. Concrete robot implementations may have additional dependencies (e.g., `pyserial` for serial communication), installed as optional extras:
+
 ```bash
-pip install physicalai                    # Core (no robot support)
-pip install physicalai[ur]                # Universal Robots only
-pip install physicalai[robots]            # All robots
+pip install physicalai                    # Core (no robot hardware support)
+pip install physicalai[so100]             # SO-100 support
+pip install physicalai[robots]            # All supported robots
 ```
 
 ---
 
 ## physicalai vs Application
 
-| Component         | Library | Application |
-| ----------------- | :-----: | :---------: |
-| Robot ABC         |    ✓    |   imports   |
-| Vendor robots     |    ✓    |   imports   |
-| Industrial robots |    ✓    |   imports   |
-| Inference loop    |    ✓    |    uses     |
-| Teleoperation     |         |      ✓      |
-| Recording/upload  |         |      ✓      |
-| Calibration       |         |      ✓      |
-| GUI               |         |      ✓      |
+| Component | Library | Application |
+|---|:---:|:---:|
+| Robot Protocol | ✓ | imports |
+| Concrete robots | ✓ | imports |
+| Inference loop | ✓ | uses |
+| Teleoperation | | ✓ |
+| Recording/upload | | ✓ |
+| Calibration | | ✓ |
+| GUI | | ✓ |
 
 The library provides building blocks. The application provides workflows. Both share the same robot interface.
 
 ---
 
-## Future: Industrial Extensions
+## Future: Extension Protocols
 
-Industrial robots have additional safety requirements. Vendor SDKs expose these methods, which can be optional in our interface:
+The Protocol approach makes future extensions clean. New capabilities are defined as separate Protocols — existing code stays untouched:
 
 ```python
-class Robot(ABC):
-    # Core (required)
+class SupportsSafety(Protocol):
+    def set_speed_scale(self, scale: float) -> None: ...
+    def emergency_stop(self) -> None: ...
+    def is_emergency_stopped(self) -> bool: ...
+
+class SupportsIntrinsics(Protocol):
+    def get_camera_intrinsics(self, name: str) -> np.ndarray: ...
+```
+
+Functions that need safety features accept `SupportsSafety`. Functions that don't still accept plain `Robot`. No existing implementation breaks when a new Protocol is introduced.
+
+```python
+class UR5e:
+    # Satisfies Robot
+    def connect(self) -> None: ...
+    def disconnect(self) -> None: ...
     def get_observation(self) -> dict[str, Any]: ...
     def send_action(self, action: np.ndarray) -> None: ...
 
-    # Safety (optional, default raises NotImplementedError)
+    # Also satisfies SupportsSafety
     def set_speed_scale(self, scale: float) -> None:
-        """Set speed scaling 0.0-1.0."""
-        raise NotImplementedError
-
-    def emergency_stop(self) -> None:
-        """Trigger emergency stop."""
-        raise NotImplementedError
-
-    def is_emergency_stopped(self) -> bool:
-        """Check if robot is in emergency stop state."""
-        raise NotImplementedError
-
-
-class UR5e(Robot):
-    def set_speed_scale(self, scale: float) -> None:
-        self._rtde.setSpeedSlider(scale)  # Delegates to ur_rtde
+        self._rtde.setSpeedSlider(scale)
 
     def emergency_stop(self) -> None:
         self._rtde.triggerProtectiveStop()
-```
 
-Core interface stays simple. Industrial features are opt-in. Alternatively, we can define a separate `IndustrialRobot` ABC if needed.
+    def is_emergency_stopped(self) -> bool:
+        return self._rtde.isProtectiveStopped()
+```
 
 ---
 
-## Multi-Robot Composition
+## Summary
 
-A common question: if you have two robot arms with a shared camera (e.g., Aloha's bimanual setup), is that one `Robot` or two?
-
-**From the DL perspective, it is one robot.** A bimanual policy produces a single action vector spanning both arms and consumes a single observation dict with images from shared cameras plus joint states from both arms. The policy doesn't know or care that the hardware is two separate serial connections.
-
-**The `Robot` ABC already supports this.** A concrete implementation like `Aloha` manages multiple hardware connections internally and exposes a unified observation/action interface:
-
-```python
-class Aloha(VendorRobot):
-    """Bimanual Aloha robot — two arms, shared cameras, one interface."""
-
-    def __init__(
-        self,
-        *,
-        leader_port: str = "/dev/ttyUSB0",
-        follower_port: str = "/dev/ttyUSB1",
-        cameras: dict[str, dict[str, Any] | "Camera"] | None = None,
-        **kwargs: Any,
-    ) -> None:
-        ...
-
-    def get_observation(self) -> dict[str, Any]:
-        # Reads from both arms + shared cameras
-        # Returns single observation with combined state vector
-        ...
-
-    def send_action(self, action: np.ndarray) -> None:
-        # Splits action vector and dispatches to both arms
-        ...
-```
-
-No `RobotGroup` abstraction is needed. The composite pattern lives inside the concrete implementation. Each multi-arm setup is a single `Robot` subclass that:
-
-1. Manages N hardware connections internally
-2. Merges joint states into one `state` array in `get_observation()`
-3. Splits the action vector and dispatches to each arm in `send_action()`
-4. Shares cameras naturally (cameras are keyed by name, not by arm)
-
-This keeps the interface simple — upstream code (policies, inference loops, application) always sees one `Robot` with one observation space and one action space.
-
-**Multiple robots** (independent arms or separate cells) should be represented by **multiple `Robot` instances**, each with its own `id`, connection lifecycle, and observation/action space. Coordination is handled by the application or teleoperation layer, not by the `Robot` ABC.
-
-### Multi-Arm Schema Example
-
-Example schema for a bimanual robot with 7‑DoF per arm:
-
-```python
-# Observation (dict format)
-{
-    "images": {
-        "wrist_left": np.ndarray,   # HWC uint8
-        "wrist_right": np.ndarray,  # HWC uint8
-        "overhead": np.ndarray,
-    },
-    "state": np.concatenate([q_left, q_right]),  # length 14
-    "timestamp": t,
-}
-
-# Action
-action = np.concatenate([u_left, u_right])  # length 14
-```
-
-**Ordering rule**: left‑arm first, right‑arm second, unless a robot defines a different explicit order in its documentation.
-
-**Multiple robots** (independent arms or separate cells) should be represented by **multiple `Robot` instances**, each with its own `id`, connection lifecycle, and observation/action space. Coordination is handled by the application or teleoperation layer, not by the `Robot` ABC.
-
-### Multi-Arm Schema Example
-
-Example schema for a bimanual robot with 7‑DoF per arm:
-
-```python
-# Observation (dict format)
-{
-    "images": {
-        "wrist_left": np.ndarray,   # HWC uint8
-        "wrist_right": np.ndarray,  # HWC uint8
-        "overhead": np.ndarray,
-    },
-    "state": np.concatenate([q_left, q_right]),  # length 14
-    "timestamp": t,
-}
-
-# Action
-action = np.concatenate([u_left, u_right])  # length 14
-```
-
-**Ordering rule**: left‑arm first, right‑arm second, unless a robot defines a different explicit order in its documentation.
-
----
-
-## Design Rationale
-
-### Why `format` Parameter Instead of Separate Methods?
-
-| Approach                                       | Pros                                                     | Cons                                                |
-| ---------------------------------------------- | -------------------------------------------------------- | --------------------------------------------------- |
-| `get_observation_dict()` / `get_observation()` | Explicit method names                                    | Two methods to maintain, unclear which is "primary" |
-| `get_observation(format=...)`                  | Single method, extensible, consistent with `data_format` | Slightly more complex signature                     |
-
-We chose the `format` parameter because:
-
-1. **Consistency**: Matches existing `data_format` pattern in other modules
-2. **Extensibility**: Easy to add new formats without new methods
-3. **Single source of truth**: One method to document and maintain
-4. **Default is framework-agnostic**: plain dict requires no imports
-
-### Why Config Dicts for Cameras in Base Interface?
-
-The Robot ABC uses `dict[str, dict[str, Any]]` for cameras because:
-
-1. **No dependencies**: Base class has no Camera import
-2. **SDK compatibility**: All robot SDKs accept dict-like configs
-3. **Serialization**: Config dicts are YAML/JSON serializable
-
-Robot implementations (SO101, etc.) accept **both** dicts and Camera objects for convenience, normalizing internally.
-
-Note that camera connection parameters are intentionally camera-type-specific rather than collapsed into a generic `device_key`. Webcams use an integer `index` (device enumeration order), RealSense cameras use a string `serial` (hardware serial number), and IP cameras use a `url`. These are semantically different types serving different purposes — collapsing them into a single string would lose type safety and make the API less self-documenting. The dict-based config (`dict[str, Any]`) already accommodates this flexibility naturally, since each camera type defines its own connection parameters.
-
-### Lifecycle Semantics for Composite Robots
-
-For multi-arm robots, `connect()`/`disconnect()` must manage all hardware links. If any required link fails to connect, the call should raise an error and the robot should be left in a safe, disconnected state. `is_connected` should return `True` only when **all** required links are connected.
-
-### Concurrency and Atomicity
-
-`get_observation()` should return a **synchronized** snapshot across arms and cameras when possible. `send_action()` should apply the full action vector as a single logical step; if the underlying SDK cannot guarantee simultaneity, implementations should document their behavior explicitly.
-
-### Lifecycle Semantics for Composite Robots
-
-For multi-arm robots, `connect()`/`disconnect()` must manage all hardware links. If any required link fails to connect, the call should raise an error and the robot should be left in a safe, disconnected state. `is_connected` should return `True` only when **all** required links are connected.
-
-### Concurrency and Atomicity
-
-`get_observation()` should return a **synchronized** snapshot across arms and cameras when possible. `send_action()` should apply the full action vector as a single logical step; if the underlying SDK cannot guarantee simultaneity, implementations should document their behavior explicitly.
-
-### Why numpy Instead of torch?
-
-The core interface uses `np.ndarray` because:
-
-1. **Universal**: numpy is a de-facto standard, available everywhere
-2. **No GPU assumptions**: Works on any device
-3. **SDK compatibility**: Robot SDKs expect numpy, not torch
-4. **Conversion is cheap**: `torch.from_numpy()` / `.numpy()` are zero-copy
-
-Users can convert to torch at the policy boundary if needed.
+| Decision | Choice |
+|---|---|
+| Interface mechanism | `Protocol` (structural typing, no inheritance) |
+| Data types | `dict[str, Any]` for observations, `np.ndarray` for actions |
+| Context manager | `connect()` wrapper function |
+| Safety | `disconnect()` must leave robot stationary (documented contract, conformance test) |
+| Cameras | Separate from robot interface; user assembles observation |
+| Concurrency | Synchronous protocol, threads allowed internally |
+| Validation | Policy manifest is source of truth, validated on first observation |
+| Frequency control | Runtime episode loop, target from manifest |
+| Built-in robots | `physicalai` ships concrete implementations for supported hardware |
+| Third-party robots | Implement the four methods, no imports from `physicalai` required |
 
 ---
 
 ## References
 
-- [Strategy](../../architecture/strategy.md) - Big-picture architecture
-- [Camera Interface Design](./camera-interface.md) - Detailed camera interface specification
-- [Teleoperation API](./teleoperation.md) - Teleoperation design
+- [Strategy](../architecture/strategy.md) — Big-picture architecture
+- [Camera Interface Design](./camera-interface.md) — Camera interface specification
 
----
-
-_Last Updated: 2026-02-13_

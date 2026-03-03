@@ -93,6 +93,21 @@ pip install -e ./dreamzero/physicalai_plugin
 {
   "format": "policy_package",
   "version": "1.0",
+  "robots": [
+    {
+        "name": "main",
+        "type": "SO-100",
+        "state": { "shape": [6], "dtype": "float32" },
+        "action": { "shape": [6], "dtype": "float32" }
+    }
+  ],
+  "cameras": [
+    {
+        "name": "wrist",
+        "shape": [3, 480, 640],
+        "dtype": "uint8"
+    }
+  ],
   "policy": {
     "name": "dreamzero",
     "kind": "custom"
@@ -501,6 +516,8 @@ exports/my_model/
 {
   "format": "policy_package",
   "version": "1.0",
+  "robots": [...],
+  "cameras": [...],
   "policy": {
     "name": "my_model",
     "kind": "single_pass"
@@ -590,6 +607,8 @@ pip install -e ./my_policy_plugin
 {
   "format": "policy_package",
   "version": "1.0",
+  "robots": [...],
+  "cameras": [...],
   "policy": {
     "name": "my_model",
     "kind": "custom"
@@ -949,7 +968,7 @@ pip install physicalai[all]
 
 - **[Strategy](./strategy.md)** - Runtime scope and boundaries
 - **[Inference Core Design](../components/inferencekit.md)** - Domain-agnostic inference layer design
-- **[Robot Interface Design](../components/robot-interface.md)** - Robot interface specification
+- **[Robot Interface Design](../components/robot-interface.md)** - Robot Protocol interface specification
 
 ---
 

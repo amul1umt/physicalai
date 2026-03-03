@@ -444,6 +444,26 @@ All exported models use a unified `manifest.json` format. The manifest uses `cla
 {
   "format": "policy_package",
   "version": "1.0",
+  "robots": [
+    {
+      "name": "main",
+      "type": "Koch v1.1",
+      "state": { "shape": [14], "dtype": "float32" },
+      "action": { "shape": [14], "dtype": "float32" }
+    }
+  ],
+  "cameras": [
+    {
+      "name": "top",
+      "shape": [3, 480, 640],
+      "dtype": "uint8"
+    },
+    {
+      "name": "wrist",
+      "shape": [3, 480, 640],
+      "dtype": "uint8"
+    }
+  ],
   "policy": {
     "name": "my_model",
     "kind": "single_pass"
@@ -486,6 +506,7 @@ The framework reads `manifest.json` and resolves the model configuration:
 
 1. **Built‑in models** (physicalai-train, LeRobot): `policy.kind` maps to a built‑in runner. No `class_path` needed for the runner — the `kind` field is sufficient.
 2. **Custom/exotic models**: `runner.class_path` points to the user's runner class. The framework instantiates it dynamically.
+3. **Hardware validation**: `robots` and `cameras` sections declare expected shapes. The runtime validates observations against these on first contact.
 
 The `class_path` + `init_args` pattern allows domain layers to specify their own components in the manifest without inferencekit needing to know about them.
 
@@ -575,6 +596,8 @@ Domain layers can publish model packages to HuggingFace that include:
 {
   "format": "policy_package",
   "version": "1.0",
+  "robots": [...],
+  "cameras":[...],
   "policy": {
     "name": "my_model",
     "kind": "custom"

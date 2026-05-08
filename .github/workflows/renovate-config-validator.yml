@@ -27,7 +27,7 @@ jobs:
       - name: Checkout configuration
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          persist-credentials: false
+          persist-credentials: true # FIXME use false once repo make public
 
       - name: Check paths
         id: check_paths

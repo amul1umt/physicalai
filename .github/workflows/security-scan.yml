@@ -27,7 +27,7 @@ jobs:
         name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          persist-credentials: true
+          persist-credentials: true # FIXME use false once repo make public
           fetch-depth: 0
 
       - name: Run Zizmor scan
@@ -65,7 +65,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          persist-credentials: true
+          persist-credentials: true # FIXME use false once repo make public
           fetch-depth: 0
 
       - name: Run Trivy scan
@@ -88,7 +88,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          persist-credentials: true
+          persist-credentials: true # FIXME use false once repo make public
           fetch-depth: 0
 
       - name: Run Semgrep scan

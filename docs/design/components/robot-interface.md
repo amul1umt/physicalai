@@ -419,25 +419,25 @@ The policy manifest declares expected hardware in dedicated `robot` and `camera`
         "shape": [6],
         "dtype": "float32",
         "joint_order": [
-          "shoulder_pan",
-          "shoulder_lift",
-          "elbow_flex",
-          "wrist_flex",
-          "wrist_roll",
-          "gripper"
-        ]
++          "shoulder_pan",
++          "shoulder_lift",
++          "elbow_flex",
++          "wrist_flex",
++          "wrist_roll",
++          "gripper"
++        ]
       },
       "action": {
         "shape": [6],
         "dtype": "float32",
         "joint_order": [
-          "shoulder_pan",
-          "shoulder_lift",
-          "elbow_flex",
-          "wrist_flex",
-          "wrist_roll",
-          "gripper"
-        ]
++          "shoulder_pan",
++          "shoulder_lift",
++          "elbow_flex",
++          "wrist_flex",
++          "wrist_roll",
++          "gripper"
++        ]
       }
     }
   ],
@@ -456,7 +456,8 @@ The policy manifest declares expected hardware in dedicated `robot` and `camera`
 }
 ```
 
-The `joint_order` field is optional but highly recommended. Without it, joint ordering is an implicit contract between training and deployment. If they disagree, shapes still validate but the policy can potentially receive scrambled input. This is especially dangerous for multi-arm robots where `[left, right]` vs `[right, left]` concatenation produces valid shapes with wrong semantics. When present, the runtime can compare `joint_order` against the robot's declared order and catch mismatches at startup. If absent, validation falls back to shape-only.
+The `joint_order` field is optional but highly recommended. Without it, joint ordering is an implicit contract between training and deployment. If they disagree, shapes still validate but the policy can potentially receive scrambled input. This is especially dangerous for multi-arm robots where `[left, right]` vs `[right, left]` concatenation produces valid shapes with wrong semantics.
+When present, the runtime can compare `joint_order` against the robot's declared order and catch mismatches at startup. If absent, validation falls back to shape-only.
 
 Note that `state` and `action` may have different `joint_order`, state can include extra sensor readings (e.g., force sensors) that are not actuated.
 

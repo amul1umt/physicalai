@@ -1,6 +1,6 @@
 ## Tutorial Notebooks
 
-**The notebooks here provide workflows for developers to get started with physical AI model fine tuning and testing the OpenVINO&trade Physical AI APIs for deploying the trained policies.**
+**The notebooks here provide workflows for developers to get started with physical AI model fine tuning and testing the OpenVINO:tm: Physical AI APIs for deploying the trained policies.**
 
 List of notebooks:
 

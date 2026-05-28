@@ -13,5 +13,15 @@ List of notebooks:
 | [005_Model_finetuning_on_remote_machine](005_Model_finetuning_on_remote_machine.ipynb) | Data collection in Physical AI Studio or LeRobot, train on a remote machine, optimize with OpenVINO and deploy using OpenVINO Physical AI API |
 
 
+**Getting Started**
+```bash
+phython -m venv venv
+source venv/bin/activate
+
+cd physicalai/examples/notebooks
+jupyter lab
+```
+
+
 
 

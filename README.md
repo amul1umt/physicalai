@@ -25,6 +25,12 @@ Physical AI Runtime provides the deployment-side components for running trained 
 - **Inference Engine** — Load exported policies from Studio with auto-detected backends
 - **Policy Runtime** — Control loop with observation building and action dispatch
 
+---
+
+<p align="center">
+  <img src="docs/assets/inference_rerun.gif" alt="Inference demo" width="100%">
+</p>
+
 ## Installation
 
 ```bash
@@ -300,11 +306,13 @@ runtime:
 <details>
 <summary><strong>CLI</strong></summary>
 
-> **Preview:** This API is not yet implemented.
-
 ```bash
-physicalai run --config runtime.yaml --duration-s 60
+physicalai run --config runtime.yaml --run.duration_s=60
 ```
+
+The runtime package owns the shared `physicalai` executable. Training packages
+can add subcommands such as `fit` and `benchmark` through the
+`physicalai.cli.subcommands` entry-point group.
 
 </details>
 
@@ -351,6 +359,10 @@ runtime.run(duration_s=60)
 ```
 
 </details>
+
+---
+
+> **Full walkthrough:** See [`examples/collect_train_deploy.ipynb`](./examples/collect_train_deploy.ipynb) for a complete collect → train → deploy guide.
 
 ---
 

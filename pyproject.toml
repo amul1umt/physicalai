@@ -29,7 +29,12 @@ dependencies = [
     "onnxruntime",
     "openvino>=2026.0",
     "openvino_tokenizers>=2026.0",
+    "jsonargparse[signatures,shtab]>=4.36",
 ]
+
+[project.scripts]
+physicalai = "physicalai.cli.main:main"
+pai = "physicalai.cli.main:main"
 
 [project.optional-dependencies]
 tests = ["pytest", "mypy"]
@@ -52,6 +57,7 @@ abb = []
 franka = []
 trossen = ["trossen-arm>=1.9.0"]
 so101 = ["feetech-servo-sdk"]
+observer-rerun = ["rerun-sdk>=0.22"]
 robots = [
     "physicalai[ur]",
     "physicalai[abb]",
@@ -131,6 +137,9 @@ fixable = ["ALL"]
 unfixable = []
 
 [tool.ruff.lint.per-file-ignores]
+# physicalai.cli is intentionally a PEP 420 namespace package (no __init__.py)
+# so the runtime and studio distributions can each contribute subcommands.
+"src/physicalai/cli/*.py" = ["INP001"]
 "src/physicalai/capture/transport/_header.py" = ["RUF012"]
 "src/physicalai/capture/transport/_publisher.py" = ["S603"]
 

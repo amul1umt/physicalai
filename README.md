@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/openvinotoolkit/physicalai/main/docs/assets/OV Physical AI header.png" alt="Physical AI" width="100%">
+  <img src="https://raw.githubusercontent.com/openvinotoolkit/physicalai/main/docs/assets/OVPhysicalAIheader.png" alt="OV Physical AI" width="100%">
 </p>
 
 <div align="center">

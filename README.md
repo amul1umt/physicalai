@@ -237,6 +237,29 @@ model = InferenceModel.load(
 
 </details>
 
+<details>
+<summary><strong>Latency benchmarking</strong></summary>
+
+```python
+import json
+
+from physicalai.benchmark.performance import InferenceLatencyBenchmark
+from physicalai.inference import InferenceModel
+
+model = InferenceModel.load("./exports/act_policy")
+model.reset()
+benchmark = InferenceLatencyBenchmark(
+        max_iters=100,
+        warmup_iters=2,
+        max_duration=10000,
+    )
+metrics = benchmark.run(model)
+print(json.dumps(metrics, indent=2))
+
+```
+
+</details>
+
 ---
 
 ## Policy Runtime

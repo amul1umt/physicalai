@@ -15,6 +15,7 @@ import numpy as np
 from physicalai.inference.adapters import adapter_registry, get_adapter
 from physicalai.inference.component_factory import instantiate_component, resolve_artifact
 from physicalai.inference.constants import ACTION
+from physicalai.inference.data.features import InferenceFeature
 from physicalai.inference.manifest import ComponentSpec, Manifest
 from physicalai.inference.runners import get_runner
 
@@ -134,6 +135,9 @@ class InferenceModel:
             postprocessors if postprocessors is not None else self._load_processors(self.manifest.model.postprocessors)
         )
 
+        self.input_features: list[InferenceFeature] = self._load_features(self.manifest.model.input_features)
+        self.output_features: list[InferenceFeature] = self._load_features(self.manifest.model.output_features)
+
         self.callbacks: list[Callback] = callbacks if callbacks is not None else []
 
         for callback in self.callbacks:
@@ -175,7 +179,7 @@ class InferenceModel:
         """
         return cls(export_dir=export_dir, **kwargs)
 
-    def __call__(self, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    def __call__(self, inputs: dict[str, np.ndarray | list[str]]) -> dict[str, np.ndarray]:
         """Run the full inference pipeline and return model outputs.
 
         Pipeline: callbacks(start) → preprocessors → _prepare_inputs →
@@ -185,7 +189,7 @@ class InferenceModel:
         dict without assuming any domain-specific keys.
 
         Args:
-            inputs: Input payload as a dict mapping names to numpy arrays.
+            inputs: Input payload as a dict mapping names to numpy arrays or lists of strings.
 
         Returns:
             Model outputs after runner execution and postprocessing.
@@ -357,6 +361,29 @@ class InferenceModel:
             List of instantiated processor objects.
         """
         return [instantiate_component(resolve_artifact(spec, self.export_dir)) for spec in specs]
+
+    def _load_features(self, specs: list[ComponentSpec]) -> list[InferenceFeature]:
+        """Instantiate :class:`InferenceFeature` objects from manifest specs.
+
+        Args:
+            specs: Component specifications declared in the manifest.
+
+        Returns:
+            List of materialised :class:`InferenceFeature` instances,
+            preserving the declared order.
+
+        Raises:
+            TypeError: If any instantiated component is not an
+                :class:`InferenceFeature` instance.
+        """
+        features: list[InferenceFeature] = []
+        for spec in specs:
+            component = instantiate_component(resolve_artifact(spec, self.export_dir))
+            if not isinstance(component, InferenceFeature):
+                msg = f"Expected an InferenceFeature instance from spec, got {type(component).__name__}"
+                raise TypeError(msg)
+            features.append(component)
+        return features
 
     def _detect_policy_name(self) -> str:
         """Auto-detect policy name from manifest or file heuristics.

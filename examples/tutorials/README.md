@@ -24,13 +24,6 @@ jupyter lab
 | [005_Collect_Train_Deploy_SO101](005_collect_train_deploy.ipynb) | Workflow for data collection, model fine tuning, and deployment with SO101 arms and π0.5 visuomotor diffusion policy |
 
 
-**Data**
-
-50–100 teleoperated demonstrations of the target task, with varied object positions. The tutorial covers two collection paths:
-
-- [Physical AI Studio](https://github.com/open-edge-platform/physical-ai-studio) (web UI, recommended)
-- [LeRobot](https://github.com/huggingface/lerobot) (CLI)
-
 ### Related documentation
 
 - [Run a Policy on a Robot](../../docs/how-to/runtime/run-policy-on-robot.md)

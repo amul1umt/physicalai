@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/physicalai.png" alt="Physical AI" width="100%">
+  <img src="https://raw.githubusercontent.com/openvinotoolkit/physicalai/main/docs/assets/physicalai.png" alt="Physical AI" width="100%">
 </p>
 
 <div align="center">
@@ -28,7 +28,7 @@ Physical AI Runtime provides the deployment-side components for running trained 
 ---
 
 <p align="center">
-  <img src="docs/assets/inference_rerun.gif" alt="Inference demo" width="100%">
+  <img src="https://raw.githubusercontent.com/openvinotoolkit/physicalai/main/docs/assets/inference_rerun.gif" alt="Inference demo" width="100%">
 </p>
 
 ## Installation
@@ -237,6 +237,29 @@ model = InferenceModel.load(
 
 </details>
 
+<details>
+<summary><strong>Latency benchmarking</strong></summary>
+
+```python
+import json
+
+from physicalai.benchmark.performance import InferenceLatencyBenchmark
+from physicalai.inference import InferenceModel
+
+model = InferenceModel.load("./exports/act_policy")
+model.reset()
+benchmark = InferenceLatencyBenchmark(
+        max_iters=100,
+        warmup_iters=2,
+        max_duration=10000,
+    )
+metrics = benchmark.run(model)
+print(json.dumps(metrics, indent=2))
+
+```
+
+</details>
+
 ---
 
 ## Policy Runtime
@@ -362,14 +385,14 @@ runtime.run(duration_s=60)
 
 ---
 
-> **Full walkthrough:** See [`examples/collect_train_deploy.ipynb`](./examples/collect_train_deploy.ipynb) for a complete collect → train → deploy guide.
+> **Full walkthrough:** See [`examples/tutorials/collect_train_deploy.ipynb`](https://github.com/openvinotoolkit/physicalai/blob/main/examples/tutorials/collect_train_deploy.ipynb) for a complete collect -> train -> deploy guide.
 
 ---
 
 ## Documentation
 
-[Home](./docs/index.md) • [Getting Started](./docs/getting-started/) • [How-To Guides](./docs/how-to/) • [Concepts](./docs/explanation/) • [API Reference](./docs/reference/)
+[Home](https://github.com/openvinotoolkit/physicalai/tree/main/docs) • [Getting Started](https://github.com/openvinotoolkit/physicalai/tree/main/docs/getting-started) • [How-To Guides](https://github.com/openvinotoolkit/physicalai/tree/main/docs/how-to) • [Concepts](https://github.com/openvinotoolkit/physicalai/tree/main/docs/explanation) • [API Reference](https://github.com/openvinotoolkit/physicalai/tree/main/docs/reference)
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md).
+See [CONTRIBUTING.md](https://github.com/openvinotoolkit/physicalai/blob/main/CONTRIBUTING.md).
